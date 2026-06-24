@@ -52,37 +52,45 @@ class SpriteToGifPlugin(Star):
     # --- 辅助方法: 获取单张图片URL (增强版) ---
     def _get_image_url(self, event: AstrMessageEvent) -> str:
         """获取目标图片URL：优先回复的图片 -> 当前消息的图片 -> At对象的头像"""
-        
+
+        def _from_image_seg(seg):
+            """从 Comp.Image 或 dict 中提取 URL，优先 url 再 file"""
+            if isinstance(seg, Comp.Image):
+                return seg.url or seg.file
+            if isinstance(seg, dict) and seg.get('type') == 'image':
+                return (seg.get('data', {}).get('url')
+                        or seg.get('url')
+                        or seg.get('data', {}).get('file')
+                        or seg.get('file'))
+            return None
+
         # 1. 检查回复链
         if hasattr(event.message_obj, "message"):
             for seg in event.message_obj.message:
                 if isinstance(seg, Comp.Reply) and seg.chain:
                     for item in seg.chain:
-                        if isinstance(item, Comp.Image) and item.url: 
-                            return item.url
-                        if isinstance(item, dict) and item.get('type') == 'image':
-                            return item.get('data', {}).get('url') or item.get('url') or item.get('file')
+                        url = _from_image_seg(item)
+                        if url:
+                            return url
 
         # 2. 检查当前消息中的图片
-        # 优先使用 AstrBot 提供的便捷方法
         if hasattr(event, "get_images"):
             images = event.get_images()
-            if images: return images[0].url
-            
+            if images:
+                img = images[0]
+                return img.url or img.file
+
         # 再次手动检查 chain (防止便捷方法遗漏)
         if hasattr(event.message_obj, "message"):
             for seg in event.message_obj.message:
-                if isinstance(seg, Comp.Image) and seg.url:
-                    return seg.url
-                if isinstance(seg, dict) and seg.get('type') == 'image':
-                    return seg.get('data', {}).get('url') or seg.get('url') or seg.get('file')
+                url = _from_image_seg(seg)
+                if url:
+                    return url
 
         # 3. 检查 At (获取头像)
         if hasattr(event.message_obj, "message"):
             for seg in event.message_obj.message:
                 if isinstance(seg, Comp.At):
-                    # 尝试排除机器人自己 (如果能获取到 self_id)
-                    # 此处假设用户 At 别人是为了获取头像
                     user_id = str(seg.qq)
                     return f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
 
@@ -485,14 +493,78 @@ class SpriteToGifPlugin(Star):
             return img_data, f"\n⚠️ 边距裁剪出错: {e}"
 
     async def _download_image(self, url: str) -> bytes:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
+        """下载图片，支持 http/https、base64://、file:// 和本地绝对路径"""
+        logger.info(f"[gifcaijian] 下载图片: {url[:120] if url else 'None'}")
+
+        # 1. base64 协议
+        if url.startswith("base64://"):
+            import base64
             try:
-                async with session.get(url, headers=headers, timeout=30) as resp:
-                    if resp.status != 200: return None
-                    return await resp.read()
-            except:
+                b64_data = url[len("base64://"):]
+                # 补齐 padding
+                missing_padding = len(b64_data) % 4
+                if missing_padding:
+                    b64_data += '=' * (4 - missing_padding)
+                return base64.b64decode(b64_data)
+            except Exception as e:
+                logger.error(f"[gifcaijian] base64解码失败: {e}")
                 return None
+
+        # 2. data URI (data:image/gif;base64,...)
+        if url.startswith("data:"):
+            import base64
+            try:
+                header, b64_data = url.split(",", 1)
+                if "base64" in header:
+                    return base64.b64decode(b64_data)
+                else:
+                    from urllib.parse import unquote
+                    return unquote(b64_data).encode("latin-1")
+            except Exception as e:
+                logger.error(f"[gifcaijian] data URI解码失败: {e}")
+                return None
+
+        # 3. file:// 协议
+        if url.startswith("file://"):
+            try:
+                file_path = urllib.parse.unquote(url[len("file://"):])
+                with open(file_path, "rb") as f:
+                    return f.read()
+            except Exception as e:
+                logger.error(f"[gifcaijian] file://读取失败: {e}")
+                return None
+
+        # 4. 本地绝对路径
+        if os.path.isabs(url) and not url.startswith("http"):
+            try:
+                with open(url, "rb") as f:
+                    return f.read()
+            except Exception as e:
+                logger.error(f"[gifcaijian] 本地文件读取失败 ({url}): {e}")
+                return None
+
+        # 5. HTTP/HTTPS 下载
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Referer": "https://multimedia.nt.qq.com.cn/",
+            "Accept": "image/*",
+        }
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status != 200:
+                        logger.error(f"[gifcaijian] HTTP {resp.status}: {url[:120]}")
+                        return None
+                    data = await resp.read()
+                    logger.info(f"[gifcaijian] HTTP下载成功: {len(data)} bytes")
+                    return data
+        except asyncio.TimeoutError:
+            logger.error(f"[gifcaijian] 下载超时: {url[:120]}")
+            return None
+        except Exception as e:
+            logger.error(f"[gifcaijian] 下载异常: {type(e).__name__}: {e}")
+            return None
 
     async def _handle_gif_task(self, event: AstrMessageEvent, algorithm_mode: int):
         msg_text = event.message_str
