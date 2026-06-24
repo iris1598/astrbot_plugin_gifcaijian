@@ -590,57 +590,176 @@ class SpriteToGifPlugin(Star):
             return f"逻辑异常: {e}", None
 
     # --- 统一变速处理逻辑 ---
-    async def _change_speed_impl(self, event: AstrMessageEvent, is_accelerate: bool):
+    @filter.command("gif变速")
+    async def change_speed(self, event: AstrMessageEvent):
+        """
+        变速命令：/gif变速 几x 或 /gif变速 几fps
+        示例：
+          /gif变速 2x      → 2倍速度 (加速)
+          /gif变速 0.5x    → 0.5倍速度 (减速)
+          /gif变速 15fps   → 目标15帧/秒
+          /gif变速 24帧    → 目标24帧/秒
+        自动检测：变速后帧率超过50fps时自动抽帧到50fps以内
+        """
         msg = event.message_str
-        # 尝试从消息中提取倍数参数
-        factor = 2.0
-        # 匹配浮点数，忽略可能存在的文字干扰
-        num_match = re.search(r"(\d+\.?\d*)", msg)
-        if num_match:
-            factor = float(num_match.group(1))
-        
-        factor = max(0.1, min(factor, 20.0))
-        ratio = 1 / factor if is_accelerate else factor
-        action_name = "加速" if is_accelerate else "减速"
+
+        factor = None
+        target_fps = None
+
+        # 尝试匹配 fps 模式：如 15fps, 24帧 等
+        fps_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:fps|帧)", msg, re.IGNORECASE)
+        if fps_match:
+            target_fps = float(fps_match.group(1))
+
+        # 尝试匹配倍速模式：如 2x, 0.5x, 2倍 等
+        x_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:[*x×]|倍)", msg)
+        if x_match:
+            factor = float(x_match.group(1))
+
+        # 如果都没有，尝试纯数字 → 默认当作倍速
+        if factor is None and target_fps is None:
+            num_match = re.search(r"(\d+(?:\.\d+)?)", msg)
+            if num_match:
+                factor = float(num_match.group(1))
+
+        if factor is None and target_fps is None:
+            yield event.plain_result("❌ 请指定变速参数\n格式: /gif变速 2x 或 /gif变速 15fps")
+            return
 
         img_url = self._get_image_url(event)
-        if not img_url: return
+        if not img_url:
+            yield event.plain_result("❌ 请发送GIF或回复GIF")
+            return
 
-        yield event.plain_result(f"⏳ 正在处理 {action_name} {factor}倍...")
+        yield event.plain_result("⏳ 正在处理变速...")
         img_data = await self._download_image(img_url)
         if not img_data:
             yield event.plain_result("❌ 下载失败")
             return
 
-        res_msg, gif_bytes = await asyncio.to_thread(self.process_speed, img_data, ratio)
+        res_msg, gif_bytes = await asyncio.to_thread(
+            self._process_speed_enhanced, img_data, factor, target_fps
+        )
         if gif_bytes:
             yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
         else:
             yield event.plain_result(f"❌ 失败：{res_msg}")
 
-    @filter.command("加速")
-    @filter.regex(r"(?:gif)?(加速|变快)\s*[*x×]?\s*(\d+\.?\d*)?")
-    async def accelerate_gif(self, event: AstrMessageEvent):
-        async for res in self._change_speed_impl(event, True): yield res
-
-    @filter.command("减速")
-    @filter.regex(r"(?:gif)?(减速|变慢)\s*[*x×]?\s*(\d+\.?\d*)?")
-    async def decelerate_gif(self, event: AstrMessageEvent):
-        async for res in self._change_speed_impl(event, False): yield res
-
-    def process_speed(self, img_data: bytes, ratio: float):
+    def _process_speed_enhanced(self, img_data: bytes, factor: float, target_fps: float):
+        """增强版变速处理，支持x倍速和fps模式，超过50fps自动抽帧"""
         try:
             img = PILImage.open(io.BytesIO(img_data))
-            if not getattr(img, "is_animated", False): return "这不是GIF", None
-            frames, durs = [], []
+            if not getattr(img, "is_animated", False):
+                return "这不是GIF动画", None
+
+            # 1. 读取原始帧和时长
+            frames_orig = []
+            durs_orig = []
             for frame in ImageSequence.Iterator(img):
-                durs.append(max(20, int(frame.info.get('duration', 100) * ratio)))
-                frames.append(frame.copy())
+                dur = frame.info.get('duration', 100)
+                if dur <= 0:
+                    dur = 100
+                durs_orig.append(dur)
+                frames_orig.append(frame.copy())
+
+            if not frames_orig:
+                return "❌ 无法读取帧", None
+
+            total_frames = len(frames_orig)
+            avg_src_fps = 1000.0 / (sum(durs_orig) / total_frames) if total_frames > 0 else 0
+
+            # 2. 计算变速倍数 ratio (ratio < 1 加速, ratio > 1 减速)
+            if target_fps is not None:
+                # FPS模式：目标帧率
+                target_fps = max(1.0, min(target_fps, 100.0))
+                ratio = avg_src_fps / target_fps if avg_src_fps > 0 else 1.0
+                mode_desc = f"目标{target_fps:.0f}fps"
+                mode_short = f"{target_fps:.0f}fps"
+            else:
+                # 倍速模式：几x = 几倍原速度
+                factor = max(0.1, min(factor, 20.0))
+                ratio = 1.0 / factor
+                mode_desc = f"{factor}x倍速"
+                mode_short = f"{factor}x"
+
+            # 3. 应用变速到每帧时长
+            new_durs = []
+            for d in durs_orig:
+                nd = int(d * ratio)
+                if nd < 1:
+                    nd = 1
+                new_durs.append(nd)
+
+            # 4. 计算调整后的平均FPS
+            avg_fps = 1000.0 / (sum(new_durs) / len(new_durs)) if new_durs else 0
+
+            # 5. 判断是否需要抽帧 (FPS > 50)
+            frame_drop_info = ""
+            final_frames = []
+            final_durs = []
+
+            if avg_fps > 50:
+                # 抽帧逻辑：累计时长，每满20ms(50fps)输出一帧
+                target_gap_ms = 20  # 50fps = 20ms/帧
+                accumulated = 0
+                for frame, dur in zip(frames_orig, new_durs):
+                    accumulated += dur
+                    if accumulated >= target_gap_ms:
+                        final_frames.append(frame)
+                        final_durs.append(accumulated)
+                        accumulated = 0
+
+                # 避免最后一帧丢失
+                if accumulated > 0 and (not final_frames or accumulated > target_gap_ms // 2):
+                    final_frames.append(frames_orig[-1])
+                    final_durs.append(accumulated)
+
+                if final_frames:
+                    actual_fps = 1000.0 / (sum(final_durs) / len(final_frames))
+                else:
+                    actual_fps = 0
+
+                kept = len(final_frames)
+                dropped = total_frames - kept
+                frame_drop_info = (
+                    f"\n⚡ 变速后帧率({avg_fps:.1f}fps)超过50fps限制，自动抽帧优化:\n"
+                    f"   抽帧方式: 累计帧时长≥20ms时保留一帧 (等价于≤50fps)\n"
+                    f"   帧数变化: {total_frames} → {kept}帧 (丢弃{dropped}帧)\n"
+                    f"   最终帧率: {actual_fps:.1f}fps"
+                )
+            else:
+                final_frames = frames_orig
+                final_durs = new_durs
+
+            # 6. 保存输出
             output = io.BytesIO()
-            frames[0].save(output, format='GIF', save_all=True, append_images=frames[1:],
-                           duration=durs, loop=0, disposal=2, optimize=True)
+            if len(final_durs) == 1:
+                final_frames[0].save(output, format='GIF', save_all=False,
+                                     duration=final_durs[0], loop=0, optimize=True)
+            else:
+                final_frames[0].save(output, format='GIF', save_all=True, append_images=final_frames[1:],
+                                     duration=final_durs, loop=0, disposal=2, optimize=True)
             output.seek(0)
-            return "✅ 变速完成", output
+
+            res_fps = 1000.0 / (sum(final_durs) / len(final_durs)) if final_durs else 0
+
+            # 7. 构建提示消息
+            if frame_drop_info:
+                summary = (
+                    f"✅ 变速完成 ({mode_short})\n"
+                    f"📊 原始: {total_frames}帧 ({avg_src_fps:.1f}fps)\n"
+                    f"📊 变速后: {avg_fps:.1f}fps"
+                    f"{frame_drop_info}"
+                )
+            else:
+                summary = (
+                    f"✅ 变速完成 ({mode_short})\n"
+                    f"📊 原始: {total_frames}帧 ({avg_src_fps:.1f}fps)\n"
+                    f"📊 结果: {res_fps:.1f}fps"
+                )
+
+            return summary, output
+
         except Exception as e:
             return f"异常: {e}", None
 
