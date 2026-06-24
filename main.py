@@ -527,18 +527,24 @@ class SpriteToGifPlugin(Star):
         # 3. file:// 协议
         if url.startswith("file://"):
             try:
-                file_path = urllib.parse.unquote(url[len("file://"):])
+                raw_path = url[len("file://"):]
+                # 去除开头的多余斜杠 (Windows 路径兼容)
+                file_path = urllib.parse.unquote(raw_path.lstrip("/"))
                 with open(file_path, "rb") as f:
-                    return f.read()
+                    data = f.read()
+                logger.info(f"[gifcaijian] file:// 读取成功: {file_path}, {len(data)} bytes")
+                return data
             except Exception as e:
-                logger.error(f"[gifcaijian] file://读取失败: {e}")
+                logger.error(f"[gifcaijian] file://读取失败 ({url[:120]}): {e}")
                 return None
 
         # 4. 本地绝对路径
         if os.path.isabs(url) and not url.startswith("http"):
             try:
                 with open(url, "rb") as f:
-                    return f.read()
+                    data = f.read()
+                logger.info(f"[gifcaijian] 本地文件读取成功: {url}, {len(data)} bytes")
+                return data
             except Exception as e:
                 logger.error(f"[gifcaijian] 本地文件读取失败 ({url}): {e}")
                 return None
@@ -739,9 +745,18 @@ class SpriteToGifPlugin(Star):
         当目标帧率 > 50fps 时自动使用抽帧实现。
         """
         try:
-            img = PILImage.open(io.BytesIO(img_data))
+            # 诊断日志
+            magic = img_data[:6] if img_data else b''
+            magic_hex = ' '.join(f'{b:02x}' for b in magic)
+            logger.info(f"[gifcaijian] process_speed: 收到 {len(img_data)} bytes, magic={magic_hex}")
 
-            # 收集原始帧和duration（不以 is_animated 判断，QQ 图片该属性常为 False）
+            img = PILImage.open(io.BytesIO(img_data))
+            logger.info(f"[gifcaijian] PIL format={img.format}, mode={img.mode}, "
+                        f"n_frames={getattr(img, 'n_frames', 'N/A')}, "
+                        f"is_animated={getattr(img, 'is_animated', 'N/A')}")
+
+            # 收集原始帧和duration
+            # 先尝试 ImageSequence.Iterator，再尝试 img.seek() 兜底
             frames = []
             raw_durs = []
             for frame in ImageSequence.Iterator(img):
@@ -750,6 +765,45 @@ class SpriteToGifPlugin(Star):
                     d = 100
                 raw_durs.append(d)
                 frames.append(frame.copy())
+
+            # 兜底：如果 Iterator 只拿到 1 帧，尝试 seek 方式遍历
+            if len(frames) <= 1:
+                try:
+                    img.seek(0)
+                    n_frames = getattr(img, 'n_frames', 1)
+                    if n_frames > 1:
+                        logger.info(f"[gifcaijian] Iterator 只拿到 {len(frames)} 帧，改用 seek 遍历 (n_frames={n_frames})")
+                        frames = []
+                        raw_durs = []
+                        for i in range(n_frames):
+                            img.seek(i)
+                            d = img.info.get('duration', 100)
+                            if d <= 0:
+                                d = 100
+                            raw_durs.append(d)
+                            frames.append(img.copy())
+                except Exception as e:
+                    logger.warning(f"[gifcaijian] seek 兜底遍历失败: {e}")
+
+            # 最终兜底：用 imageio 读帧
+            if len(frames) <= 1 and imageio is not None:
+                try:
+                    logger.info(f"[gifcaijian] Pillow 只拿到 {len(frames)} 帧，尝试 imageio 读取")
+                    gif_reader = imageio.get_reader(io.BytesIO(img_data), format='GIF')
+                    frames = []
+                    raw_durs = []
+                    for frame_data in gif_reader:
+                        meta = frame_data.meta
+                        d = meta.get('duration', 0.1)  # imageio duration 单位是秒
+                        if d <= 0:
+                            d = 0.1
+                        raw_durs.append(int(d * 1000))  # 转为毫秒
+                        frames.append(PILImage.fromarray(frame_data))
+                    gif_reader.close()
+                except Exception as e:
+                    logger.warning(f"[gifcaijian] imageio 读取也失败: {e}")
+
+            logger.info(f"[gifcaijian] 最终收集到 {len(frames)} 帧")
 
             if not frames:
                 return "无法读取GIF帧", None
