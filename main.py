@@ -740,10 +740,8 @@ class SpriteToGifPlugin(Star):
         """
         try:
             img = PILImage.open(io.BytesIO(img_data))
-            if not getattr(img, "is_animated", False):
-                return "这不是GIF动图，无法变速", None
 
-            # 收集原始帧和duration
+            # 收集原始帧和duration（不以 is_animated 判断，QQ 图片该属性常为 False）
             frames = []
             raw_durs = []
             for frame in ImageSequence.Iterator(img):
@@ -755,6 +753,8 @@ class SpriteToGifPlugin(Star):
 
             if not frames:
                 return "无法读取GIF帧", None
+            if len(frames) < 2:
+                return "这不是GIF动图（仅1帧），无法变速", None
 
             # 计算原始平均FPS
             avg_dur = sum(raw_durs) / len(raw_durs)
@@ -887,13 +887,14 @@ class SpriteToGifPlugin(Star):
     def _worker_decompose(self, img_data: bytes):
         try:
             img = PILImage.open(io.BytesIO(img_data))
-            if not getattr(img, "is_animated", False): return "⚠️ 不是GIF动画"
             frames = []
             for i, frame in enumerate(ImageSequence.Iterator(img)):
                 if i >= 100: break
                 out = io.BytesIO()
                 frame.copy().convert("RGBA").save(out, format='PNG')
                 frames.append(out.getvalue())
+            if len(frames) < 2:
+                return "⚠️ 不是GIF动画（仅1帧）"
             return frames
         except Exception as e:
             return f"❌ 出错: {e}"
