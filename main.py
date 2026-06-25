@@ -611,11 +611,8 @@ class SpriteToGifPlugin(Star):
 
         if mode is None or value is None or value <= 0:
             yield event.plain_result(
-                "❌ 用法:\n"
-                "/gif变速 2x — 2倍速\n"
-                "/gif变速 0.5x — 0.5倍速(慢放)\n"
-                "/gif变速 30fps — 设为30帧/秒\n"
-                "💡 变速超过50fps时自动使用抽帧实现"
+                "❌ /gif变速 2x | /gif变速 30fps\n"
+                ">50fps自动抽帧"
             )
             return
 
@@ -694,8 +691,7 @@ class SpriteToGifPlugin(Star):
                         out_durs.append(new_d)
 
                 decimation_msg = (
-                    f"\n💡 已使用抽帧实现 (目标 {effective_fps:.0f}fps > 50fps 阈值)"
-                    f"\n  原{n_orig}帧 → {len(out_frames)}帧 (每{step}帧取1帧)"
+                    f" (抽帧·每{step}取1, {len(out_frames)}帧)"
                 )
             else:
                 # 普通变速：仅调整帧时长
@@ -717,13 +713,9 @@ class SpriteToGifPlugin(Star):
             old_total_s = total_dur_ms / 1000.0
             new_avg_fps = len(out_frames) / new_total_s if new_total_s > 0 else 0
 
+            action_label = f"{value}x" if mode == 'x' else f"{value}fps"
             result_msg = (
-                f"✅ 变速完成 ({mode}:{value})"
-                f"\n原~{avg_fps:.0f}fps → 新~{new_avg_fps:.0f}fps"
-                f"\n时长: {old_total_s:.1f}s → {new_total_s:.1f}s"
-                f"\n帧数: {n_orig} → {len(out_frames)}"
-                f"\n体积: {size_mb:.2f}MB"
-                f"{decimation_msg}"
+                f"✅ 变速 {action_label} 完成 | ~{new_avg_fps:.0f}fps | {size_mb:.2f}MB{decimation_msg}"
             )
 
             return result_msg, output
