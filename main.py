@@ -21,8 +21,8 @@ except ImportError:
 @register(
     "astrbot_plugin_gifcaijian",
     "shskjw",
-    "支持GIF/APNG/WebP转换、裁剪、本地图片转线稿及多图合成(终极稳定版)",
-    "1.4.2",
+    "支持GIF/APNG/WebP转换、裁剪、变速(倍速&帧率,>50fps抽帧)、本地图片转线稿及多图合成(终极稳定版)",
+    "1.5.0",
     "https://github.com/shkjw/astrbot_plugin_gifcaijian",
 )
 class SpriteToGifPlugin(Star):
@@ -589,147 +589,211 @@ class SpriteToGifPlugin(Star):
         except Exception as e:
             return f"逻辑异常: {e}", None
 
-    # --- 统一变速命令：/gif变速 ---
+    # --- 统一变速处理逻辑 (v2: 支持倍速/帧率两种模式, fps>50自动抽帧) ---
     @filter.command("gif变速")
     async def gif_speed_change(self, event: AstrMessageEvent):
-        msg = event.message_str
+        '''GIF 变速: /gif变速 2x (倍速) 或 /gif变速 30fps (帧率)'''
+        msg = event.message_str.replace("gif变速", "", 1).strip()
+        
         is_fps_mode = False
-        speed_factor = 2.0
-        mode_desc = ""
-
-        # 1. 解析 fps 模式：/gif变速 60fps 或 /gif变速 60帧
-        fps_match = re.search(r'(\d+\.?\d*)\s*(?:fps|帧)', msg, re.I)
+        value = 2.0
+        
+        # 解析参数: "Nfps" / "N帧" → fps 模式; "Nx" → 倍速模式; 纯数字 → 倍速模式
+        fps_match = re.search(r'(\d+\.?\d*)\s*(?:fps|FPS|帧)', msg)
+        mult_match = re.search(r'(\d+\.?\d*)\s*[xX×]', msg)
+        num_match = re.search(r'(\d+\.?\d*)', msg)
+        
         if fps_match:
-            speed_factor = float(fps_match.group(1))
-            speed_factor = max(1.0, min(speed_factor, 120.0))
             is_fps_mode = True
-            mode_desc = f"{speed_factor:.0f}fps"
-        else:
-            # 2. 解析倍数模式：/gif变速 2x 或 /gif变速 0.5倍 或纯数字
-            mult_match = re.search(r'(\d+\.?\d*)\s*[xX×倍]', msg)
-            if mult_match:
-                speed_factor = float(mult_match.group(1))
-            else:
-                num_match = re.search(r'(\d+\.?\d*)', msg)
-                if num_match:
-                    speed_factor = float(num_match.group(1))
-            speed_factor = max(0.1, min(speed_factor, 20.0))
-            mode_desc = f"{speed_factor}x"
-
+            value = float(fps_match.group(1))
+            value = max(1.0, min(value, 120.0))
+        elif mult_match:
+            value = float(mult_match.group(1))
+            value = max(0.1, min(value, 20.0))
+        elif num_match:
+            value = float(num_match.group(1))
+            value = max(0.1, min(value, 20.0))
+        
         img_url = self._get_image_url(event)
         if not img_url:
-            yield event.plain_result("❌ 请发送GIF或回复GIF\n用法: /gif变速 2x (倍数)  或  /gif变速 30fps (目标帧率)")
+            yield event.plain_result("❌ 请回复一个GIF或发送GIF图片\n用法: /gif变速 2x (倍速) 或 /gif变速 30fps (帧率)")
             return
-
-        yield event.plain_result(f"⏳ 正在变速 {mode_desc}...")
+        
+        if is_fps_mode:
+            yield event.plain_result(f"⏳ 正在变速到 {value:.0f}fps...")
+        else:
+            action = "加速" if value > 1 else ("减速" if value < 1 else "不变")
+            yield event.plain_result(f"⏳ 正在{action} {value}倍...")
+        
         img_data = await self._download_image(img_url)
         if not img_data:
             yield event.plain_result("❌ 下载失败")
             return
-
-        res_msg, gif_bytes = await asyncio.to_thread(self.process_speed, img_data, speed_factor, is_fps_mode)
+        
+        res_msg, gif_bytes = await asyncio.to_thread(
+            self.process_speed_v2, img_data, value, is_fps_mode
+        )
+        
         if gif_bytes:
             yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
         else:
             yield event.plain_result(f"❌ 失败：{res_msg}")
 
-    # --- 兼容旧命令：加速 / 减速（转发到变速逻辑） ---
-    async def _legacy_speed_impl(self, event: AstrMessageEvent, is_accelerate: bool):
+    # 保留旧指令作为别名，内部走统一逻辑
+    @filter.command("加速")
+    @filter.regex(r"(?:gif)?(加速|变快)\s*[*x×]?\s*(\d+\.?\d*)?")
+    async def accelerate_gif(self, event: AstrMessageEvent):
+        '''GIF加速 (旧指令, 等效于 /gif变速 Nx)'''
         msg = event.message_str
         factor = 2.0
         num_match = re.search(r"(\d+\.?\d*)", msg)
         if num_match:
             factor = float(num_match.group(1))
         factor = max(0.1, min(factor, 20.0))
-        speed_factor = factor if is_accelerate else (1.0 / factor)
-        action_name = "加速" if is_accelerate else "减速"
-
+        
         img_url = self._get_image_url(event)
-        if not img_url:
-            return
-        yield event.plain_result(f"⏳ 正在处理 {action_name} {factor}倍...")
+        if not img_url: return
+        yield event.plain_result(f"⏳ 正在加速 {factor}倍...")
         img_data = await self._download_image(img_url)
         if not img_data:
             yield event.plain_result("❌ 下载失败")
             return
-        res_msg, gif_bytes = await asyncio.to_thread(self.process_speed, img_data, speed_factor, is_fps_mode=False)
+        res_msg, gif_bytes = await asyncio.to_thread(self.process_speed_v2, img_data, factor, False)
         if gif_bytes:
             yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
         else:
             yield event.plain_result(f"❌ 失败：{res_msg}")
 
-    @filter.command("加速")
-    async def accelerate_gif(self, event: AstrMessageEvent):
-        async for res in self._legacy_speed_impl(event, True): yield res
-
     @filter.command("减速")
+    @filter.regex(r"(?:gif)?(减速|变慢)\s*[*x×]?\s*(\d+\.?\d*)?")
     async def decelerate_gif(self, event: AstrMessageEvent):
-        async for res in self._legacy_speed_impl(event, False): yield res
+        '''GIF减速 (旧指令, 等效于 /gif变速 Nx)'''
+        msg = event.message_str
+        factor = 2.0
+        num_match = re.search(r"(\d+\.?\d*)", msg)
+        if num_match:
+            factor = float(num_match.group(1))
+        factor = max(0.1, min(factor, 20.0))
+        
+        img_url = self._get_image_url(event)
+        if not img_url: return
+        yield event.plain_result(f"⏳ 正在减速 {factor}倍...")
+        img_data = await self._download_image(img_url)
+        if not img_data:
+            yield event.plain_result("❌ 下载失败")
+            return
+        # 减速: ratio = factor (duration * factor)
+        res_msg, gif_bytes = await asyncio.to_thread(
+            self.process_speed_v2, img_data, 1.0 / factor, False
+        )
+        if gif_bytes:
+            yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
+        else:
+            yield event.plain_result(f"❌ 失败：{res_msg}")
 
-    # --- 变速核心算法（支持倍数/目标fps两种模式，超过50fps自动抽帧） ---
-    MAX_FPS = 50
-
-    def process_speed(self, img_data: bytes, speed_factor: float, is_fps_mode: bool = False):
+    def process_speed_v2(self, img_data: bytes, value: float, is_fps_mode: bool):
         """
-        speed_factor:
-          - is_fps_mode=False: 倍数模式，1.0=原速, 2.0=2倍速, 0.5=半速
-          - is_fps_mode=True:  目标fps模式，如 30fps, 60fps
-        当变速后帧率超过50fps时自动抽帧降帧率。
+        统一变速处理 (v2): 支持倍速模式和帧率模式。
+        - 倍速模式: value = 速度倍数 (如 2.0 = 2倍速)
+        - 帧率模式: value = 目标 fps (如 30 = 30fps)
+        - 当目标 fps > 50 时自动抽帧实现
         """
+        MAX_FPS = 50
+        MIN_DURATION_MS = 20  # 1000ms / 50fps
+        
         try:
             img = PILImage.open(io.BytesIO(img_data))
             if not getattr(img, "is_animated", False):
-                return "这不是GIF/动图", None
-
-            # 收集所有帧及其原始时长
-            frames, orig_durs = [], []
+                return "这不是GIF动画", None
+            
+            # 提取所有帧及其原始时长
+            frames = []
+            orig_durations = []
             for frame in ImageSequence.Iterator(img):
-                orig_durs.append(frame.info.get('duration', 100))
+                dur = frame.info.get('duration', 100)
+                if dur <= 0:
+                    dur = 100
+                orig_durations.append(dur)
                 frames.append(frame.copy())
-
+            
             if not frames:
                 return "无有效帧", None
-
-            # 计算原始平均帧率
-            avg_orig_dur = sum(orig_durs) / len(orig_durs)
-            orig_fps = 1000.0 / avg_orig_dur if avg_orig_dur > 0 else 10.0
-
-            # 根据模式计算 duration 缩放比
+            
+            total_duration = sum(orig_durations)
+            avg_duration = total_duration / len(frames)
+            orig_fps = 1000.0 / avg_duration if avg_duration > 0 else 10.0
+            
             if is_fps_mode:
-                target_fps = speed_factor
-                ratio = orig_fps / target_fps if target_fps > 0 else 1.0
+                target_fps = value
+                
+                if target_fps > MAX_FPS:
+                    # --- 自动抽帧模式: fps > 50 ---
+                    # GIF 最小帧间隔 20ms (=50fps)，无法直接实现 >50fps
+                    # 策略: 帧间隔保持 20ms(50fps)，通过抽帧来模拟更高帧率的视觉效果
+                    keep_ratio = MAX_FPS / target_fps
+                    frames_to_keep = max(2, int(len(frames) * keep_ratio))
+                    
+                    # 均匀采样保留帧
+                    new_frames = []
+                    for i in range(frames_to_keep):
+                        idx = int(i * len(frames) / frames_to_keep)
+                        new_frames.append(frames[idx])
+                    
+                    new_durations = [MIN_DURATION_MS] * len(new_frames)
+                    
+                    output = io.BytesIO()
+                    new_frames[0].save(
+                        output, format='GIF', save_all=True,
+                        append_images=new_frames[1:],
+                        duration=new_durations, loop=0,
+                        disposal=2, optimize=True
+                    )
+                    output.seek(0)
+                    
+                    msg = (f"✅ 变速完成\n"
+                           f"目标: {target_fps:.0f}fps | 原始: {orig_fps:.1f}fps\n"
+                           f"💡 已自动抽帧实现 ({len(new_frames)}/{len(frames)}帧)")
+                    return msg, output
+                else:
+                    # 普通帧率模式: 直接设置帧间隔
+                    target_duration = int(1000.0 / target_fps)
+                    new_durations = [target_duration] * len(frames)
+                    
+                    output = io.BytesIO()
+                    frames[0].save(
+                        output, format='GIF', save_all=True,
+                        append_images=frames[1:],
+                        duration=new_durations, loop=0,
+                        disposal=2, optimize=True
+                    )
+                    output.seek(0)
+                    
+                    msg = f"✅ 变速完成\n目标: {target_fps:.0f}fps | 原始: {orig_fps:.1f}fps"
+                    return msg, output
             else:
-                ratio = 1.0 / speed_factor  # 2x → ratio=0.5（时长减半）
-
-            # 应用变速，每帧最短20ms
-            new_durs = [max(20, int(d * ratio)) for d in orig_durs]
-
-            # 判断是否需要抽帧：变速后平均帧率 > MAX_FPS
-            avg_new_dur = sum(new_durs) / len(new_durs)
-            avg_new_fps = 1000.0 / avg_new_dur if avg_new_dur > 0 else self.MAX_FPS
-
-            dropped = False
-            original_count = len(frames)
-            if avg_new_fps > self.MAX_FPS:
-                step = max(2, round(avg_new_fps / self.MAX_FPS))
-                keep_frames, keep_durs = [], []
-                for i in range(0, len(frames), step):
-                    keep_frames.append(frames[i])
-                    keep_durs.append(new_durs[i])
-                frames, new_durs = keep_frames, keep_durs
-                dropped = True
-
-            output = io.BytesIO()
-            frames[0].save(output, format='GIF', save_all=True, append_images=frames[1:],
-                           duration=new_durs, loop=0, disposal=2, optimize=True)
-            output.seek(0)
-
-            # 构建结果消息
-            mode_str = f"{speed_factor:.0f}fps" if is_fps_mode else f"{speed_factor}x"
-            msg = f"✅ 变速完成 ({mode_str})"
-            if dropped:
-                msg += f"\n💡 帧率超{self.MAX_FPS}fps，已自动抽帧({original_count}→{len(frames)}帧)"
-            return msg, output
+                # 倍速模式: value = 速度倍数
+                speed_factor = value
+                ratio = 1.0 / speed_factor  # 时长缩放比例
+                
+                new_durations = []
+                for d in orig_durations:
+                    new_d = max(MIN_DURATION_MS, int(d * ratio))
+                    new_durations.append(new_d)
+                
+                output = io.BytesIO()
+                frames[0].save(
+                    output, format='GIF', save_all=True,
+                    append_images=frames[1:],
+                    duration=new_durations, loop=0,
+                    disposal=2, optimize=True
+                )
+                output.seek(0)
+                
+                effective_fps = 1000.0 / (sum(new_durations) / len(new_durations))
+                action = "加速" if speed_factor > 1 else ("减速" if speed_factor < 1 else "")
+                msg = f"✅ 变速完成\n{speed_factor}x{action} | 原始 {orig_fps:.1f}fps → 等效 {effective_fps:.1f}fps"
+                return msg, output
+                
         except Exception as e:
             return f"异常: {e}", None
 
@@ -1019,6 +1083,7 @@ class SpriteToGifPlugin(Star):
         return img
 
     @filter.command("表情包做旧")
+    @filter.regex(r"(?:表情包?)?做旧\s*(\d+)?")
     async def age_meme(self, event: AstrMessageEvent):
         """
         表情包做旧功能，模拟早期互联网图片传播效果
