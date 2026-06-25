@@ -3,4 +3,4 @@ desc: GIF裁剪/合成/分解/变速(倍速&帧率,支持>50fps抽帧)/表情包
 help:  # 插件的帮助信息
 version: v1.5.0 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: shskjw
-repo: https://github.com/shskjw/astrbot_plugin_gifcaijian
+repo: https://github.com/iris1598/astrbot_plugin_gifcaijian
