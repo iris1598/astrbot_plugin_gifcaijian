@@ -21,8 +21,8 @@ except ImportError:
 @register(
     "astrbot_plugin_gifcaijian",
     "shskjw",
-    "支持GIF变速(gif变速)、转换、裁剪、线稿、多图合成及做旧",
-    "1.4.3",
+    "支持GIF/APNG/WebP转换、裁剪、本地图片转线稿及多图合成(终极稳定版)",
+    "1.4.2",
     "https://github.com/shkjw/astrbot_plugin_gifcaijian",
 )
 class SpriteToGifPlugin(Star):
@@ -52,45 +52,37 @@ class SpriteToGifPlugin(Star):
     # --- 辅助方法: 获取单张图片URL (增强版) ---
     def _get_image_url(self, event: AstrMessageEvent) -> str:
         """获取目标图片URL：优先回复的图片 -> 当前消息的图片 -> At对象的头像"""
-
-        def _from_image_seg(seg):
-            """从 Comp.Image 或 dict 中提取 URL，优先 url 再 file"""
-            if isinstance(seg, Comp.Image):
-                return seg.url or seg.file
-            if isinstance(seg, dict) and seg.get('type') == 'image':
-                return (seg.get('data', {}).get('url')
-                        or seg.get('url')
-                        or seg.get('data', {}).get('file')
-                        or seg.get('file'))
-            return None
-
+        
         # 1. 检查回复链
         if hasattr(event.message_obj, "message"):
             for seg in event.message_obj.message:
                 if isinstance(seg, Comp.Reply) and seg.chain:
                     for item in seg.chain:
-                        url = _from_image_seg(item)
-                        if url:
-                            return url
+                        if isinstance(item, Comp.Image) and item.url: 
+                            return item.url
+                        if isinstance(item, dict) and item.get('type') == 'image':
+                            return item.get('data', {}).get('url') or item.get('url') or item.get('file')
 
         # 2. 检查当前消息中的图片
+        # 优先使用 AstrBot 提供的便捷方法
         if hasattr(event, "get_images"):
             images = event.get_images()
-            if images:
-                img = images[0]
-                return img.url or img.file
-
+            if images: return images[0].url
+            
         # 再次手动检查 chain (防止便捷方法遗漏)
         if hasattr(event.message_obj, "message"):
             for seg in event.message_obj.message:
-                url = _from_image_seg(seg)
-                if url:
-                    return url
+                if isinstance(seg, Comp.Image) and seg.url:
+                    return seg.url
+                if isinstance(seg, dict) and seg.get('type') == 'image':
+                    return seg.get('data', {}).get('url') or seg.get('url') or seg.get('file')
 
         # 3. 检查 At (获取头像)
         if hasattr(event.message_obj, "message"):
             for seg in event.message_obj.message:
                 if isinstance(seg, Comp.At):
+                    # 尝试排除机器人自己 (如果能获取到 self_id)
+                    # 此处假设用户 At 别人是为了获取头像
                     user_id = str(seg.qq)
                     return f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
 
@@ -493,84 +485,14 @@ class SpriteToGifPlugin(Star):
             return img_data, f"\n⚠️ 边距裁剪出错: {e}"
 
     async def _download_image(self, url: str) -> bytes:
-        """下载图片，支持 http/https、base64://、file:// 和本地绝对路径"""
-        logger.info(f"[gifcaijian] 下载图片: {url[:120] if url else 'None'}")
-
-        # 1. base64 协议
-        if url.startswith("base64://"):
-            import base64
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
             try:
-                b64_data = url[len("base64://"):]
-                # 补齐 padding
-                missing_padding = len(b64_data) % 4
-                if missing_padding:
-                    b64_data += '=' * (4 - missing_padding)
-                return base64.b64decode(b64_data)
-            except Exception as e:
-                logger.error(f"[gifcaijian] base64解码失败: {e}")
+                async with session.get(url, headers=headers, timeout=30) as resp:
+                    if resp.status != 200: return None
+                    return await resp.read()
+            except:
                 return None
-
-        # 2. data URI (data:image/gif;base64,...)
-        if url.startswith("data:"):
-            import base64
-            try:
-                header, b64_data = url.split(",", 1)
-                if "base64" in header:
-                    return base64.b64decode(b64_data)
-                else:
-                    from urllib.parse import unquote
-                    return unquote(b64_data).encode("latin-1")
-            except Exception as e:
-                logger.error(f"[gifcaijian] data URI解码失败: {e}")
-                return None
-
-        # 3. file:// 协议
-        if url.startswith("file://"):
-            try:
-                raw_path = url[len("file://"):]
-                # 去除开头的多余斜杠 (Windows 路径兼容)
-                file_path = urllib.parse.unquote(raw_path.lstrip("/"))
-                with open(file_path, "rb") as f:
-                    data = f.read()
-                logger.info(f"[gifcaijian] file:// 读取成功: {file_path}, {len(data)} bytes")
-                return data
-            except Exception as e:
-                logger.error(f"[gifcaijian] file://读取失败 ({url[:120]}): {e}")
-                return None
-
-        # 4. 本地绝对路径
-        if os.path.isabs(url) and not url.startswith("http"):
-            try:
-                with open(url, "rb") as f:
-                    data = f.read()
-                logger.info(f"[gifcaijian] 本地文件读取成功: {url}, {len(data)} bytes")
-                return data
-            except Exception as e:
-                logger.error(f"[gifcaijian] 本地文件读取失败 ({url}): {e}")
-                return None
-
-        # 5. HTTP/HTTPS 下载
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Referer": "https://multimedia.nt.qq.com.cn/",
-            "Accept": "image/*",
-        }
-        try:
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status != 200:
-                        logger.error(f"[gifcaijian] HTTP {resp.status}: {url[:120]}")
-                        return None
-                    data = await resp.read()
-                    logger.info(f"[gifcaijian] HTTP下载成功: {len(data)} bytes")
-                    return data
-        except asyncio.TimeoutError:
-            logger.error(f"[gifcaijian] 下载超时: {url[:120]}")
-            return None
-        except Exception as e:
-            logger.error(f"[gifcaijian] 下载异常: {type(e).__name__}: {e}")
-            return None
 
     async def _handle_gif_task(self, event: AstrMessageEvent, algorithm_mode: int):
         msg_text = event.message_str
@@ -667,217 +589,148 @@ class SpriteToGifPlugin(Star):
         except Exception as e:
             return f"逻辑异常: {e}", None
 
-    # --- 统一变速处理逻辑 (/gif变速) ---
-    async def _change_speed_impl(self, event: AstrMessageEvent, mode: str, value: float):
-        """
-        mode: 'multiplier' = 倍速模式, 'fps' = 帧率模式
-        value: 对应的数值
-        """
-        img_url = self._get_image_url(event)
-        if not img_url:
-            yield event.plain_result("❌ 未检测到GIF图片，请发送或回复一张GIF")
+    # --- 统一变速处理：/gif变速 2x 或 /gif变速 30fps ---
+    @filter.command("gif变速")
+    async def gif_speed_change(self, event: AstrMessageEvent):
+        msg = event.message_str.replace("gif变速", "").strip()
+
+        mode = None
+        value = None
+
+        # 尝试 "Nx" 或 "NX" 或 "N×" 格式
+        x_match = re.search(r'(\d+\.?\d*)\s*[xX×]', msg)
+        if x_match:
+            value = float(x_match.group(1))
+            mode = 'x'
+        else:
+            # 尝试 "Nfps" 或 "NFPS" 或 "N帧" 或纯数字
+            fps_match = re.search(r'(\d+\.?\d*)\s*(?:fps|FPS|帧)?', msg)
+            if fps_match:
+                value = float(fps_match.group(1))
+                mode = 'fps'
+
+        if mode is None or value is None or value <= 0:
+            yield event.plain_result(
+                "❌ 用法:\n"
+                "/gif变速 2x — 2倍速\n"
+                "/gif变速 0.5x — 0.5倍速(慢放)\n"
+                "/gif变速 30fps — 设为30帧/秒\n"
+                "💡 变速超过50fps时自动使用抽帧实现"
+            )
             return
 
-        if mode == 'multiplier':
-            desc = f"{value}x 倍速"
+        # 限幅
+        if mode == 'x':
+            value = max(0.05, min(value, 30.0))
         else:
-            desc = f"{value}fps"
+            value = max(1, min(value, 120))
 
-        yield event.plain_result(f"⏳ 正在处理变速 ({desc})...")
+        img_url = self._get_image_url(event)
+        if not img_url:
+            yield event.plain_result("❌ 请发送或回复一个GIF动图")
+            return
+
+        action_desc = f"{value}x" if mode == 'x' else f"{value}fps"
+        yield event.plain_result(f"⏳ 正在变速处理 ({action_desc})...")
+
         img_data = await self._download_image(img_url)
         if not img_data:
             yield event.plain_result("❌ 下载失败")
             return
 
-        res_msg, gif_bytes = await asyncio.to_thread(self.process_speed, img_data, mode, value)
+        res_msg, gif_bytes = await asyncio.to_thread(
+            self.process_speed_v2, img_data, mode, value
+        )
         if gif_bytes:
             yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
         else:
             yield event.plain_result(f"❌ 失败：{res_msg}")
 
-    @filter.command("gif变速")
-    async def gif_speed_change(self, event: AstrMessageEvent):
-        """统一变速命令：/gif变速 2x 或 /gif变速 30fps"""
-        msg = event.message_str.replace("gif变速", "").strip()
-
-        # 匹配 "数字x" / "数字X" / "数字×" → 倍速模式
-        multiplier_match = re.search(r'(\d+\.?\d*)\s*[xX×]', msg)
-        # 匹配 "数字fps" / "数字FPS" → 帧率模式
-        fps_match = re.search(r'(\d+\.?\d*)\s*(?:fps|FPS)', msg)
-
-        if multiplier_match:
-            value = float(multiplier_match.group(1))
-            value = max(0.1, min(value, 100.0))
-            async for res in self._change_speed_impl(event, 'multiplier', value):
-                yield res
-            return
-
-        if fps_match:
-            value = float(fps_match.group(1))
-            value = max(1, min(value, 240))
-            async for res in self._change_speed_impl(event, 'fps', value):
-                yield res
-            return
-
-        # 纯数字兜底：当作倍速处理
-        num_match = re.search(r'(\d+\.?\d*)', msg)
-        if num_match:
-            value = float(num_match.group(1))
-            if value > 0:
-                value = max(0.1, min(value, 100.0))
-                async for res in self._change_speed_impl(event, 'multiplier', value):
-                    yield res
-                return
-
-        yield event.plain_result(
-            "❌ 请指定变速参数\n"
-            "用法:\n"
-            "/gif变速 2x    → 加速2倍\n"
-            "/gif变速 0.5x  → 减速至0.5倍\n"
-            "/gif变速 30fps → 设置为30帧/秒"
-        )
-
-    def process_speed(self, img_data: bytes, mode: str, value: float):
-        """
-        变速核心逻辑。
-        mode='multiplier': value 是倍速（1.0=原速, 2.0=2倍速, 0.5=半速）
-        mode='fps':       value 是目标帧率
-        当目标帧率 > 50fps 时自动使用抽帧实现。
-        """
+    def process_speed_v2(self, img_data: bytes, mode: str, value: float):
+        """统一变速核心：支持 x 倍数和 fps 两种模式，超过50fps自动抽帧"""
         try:
-            # 诊断日志
-            magic = img_data[:6] if img_data else b''
-            magic_hex = ' '.join(f'{b:02x}' for b in magic)
-            logger.info(f"[gifcaijian] process_speed: 收到 {len(img_data)} bytes, magic={magic_hex}")
-
             img = PILImage.open(io.BytesIO(img_data))
-            logger.info(f"[gifcaijian] PIL format={img.format}, mode={img.mode}, "
-                        f"n_frames={getattr(img, 'n_frames', 'N/A')}, "
-                        f"is_animated={getattr(img, 'is_animated', 'N/A')}")
+            if not getattr(img, "is_animated", False):
+                return "这不是GIF动画", None
 
-            # 收集原始帧和duration
-            # 先尝试 ImageSequence.Iterator，再尝试 img.seek() 兜底
-            frames = []
-            raw_durs = []
+            frames_raw = []
+            durs_raw = []
             for frame in ImageSequence.Iterator(img):
-                d = frame.info.get('duration', 100)
-                if d <= 0:
-                    d = 100
-                raw_durs.append(d)
-                frames.append(frame.copy())
+                dur = frame.info.get('duration', 100)
+                if dur <= 0:
+                    dur = 100
+                durs_raw.append(dur)
+                frames_raw.append(frame.copy())
 
-            # 兜底：如果 Iterator 只拿到 1 帧，尝试 seek 方式遍历
-            if len(frames) <= 1:
-                try:
-                    img.seek(0)
-                    n_frames = getattr(img, 'n_frames', 1)
-                    if n_frames > 1:
-                        logger.info(f"[gifcaijian] Iterator 只拿到 {len(frames)} 帧，改用 seek 遍历 (n_frames={n_frames})")
-                        frames = []
-                        raw_durs = []
-                        for i in range(n_frames):
-                            img.seek(i)
-                            d = img.info.get('duration', 100)
-                            if d <= 0:
-                                d = 100
-                            raw_durs.append(d)
-                            frames.append(img.copy())
-                except Exception as e:
-                    logger.warning(f"[gifcaijian] seek 兜底遍历失败: {e}")
+            if not frames_raw:
+                return "GIF无帧", None
 
-            # 最终兜底：用 imageio 读帧
-            if len(frames) <= 1 and imageio is not None:
-                try:
-                    logger.info(f"[gifcaijian] Pillow 只拿到 {len(frames)} 帧，尝试 imageio 读取")
-                    gif_reader = imageio.get_reader(io.BytesIO(img_data), format='GIF')
-                    frames = []
-                    raw_durs = []
-                    for frame_data in gif_reader:
-                        meta = frame_data.meta
-                        d = meta.get('duration', 0.1)  # imageio duration 单位是秒
-                        if d <= 0:
-                            d = 0.1
-                        raw_durs.append(int(d * 1000))  # 转为毫秒
-                        frames.append(PILImage.fromarray(frame_data))
-                    gif_reader.close()
-                except Exception as e:
-                    logger.warning(f"[gifcaijian] imageio 读取也失败: {e}")
+            n_orig = len(frames_raw)
+            total_dur_ms = sum(durs_raw)
+            avg_dur = total_dur_ms / n_orig if n_orig > 0 else 100
+            avg_fps = 1000.0 / avg_dur if avg_dur > 0 else 10.0
 
-            logger.info(f"[gifcaijian] 最终收集到 {len(frames)} 帧")
-
-            if not frames:
-                return "无法读取GIF帧", None
-            if len(frames) < 2:
-                return "这不是GIF动图（仅1帧），无法变速", None
-
-            # 计算原始平均FPS
-            avg_dur = sum(raw_durs) / len(raw_durs)
-            original_fps = 1000.0 / avg_dur
-
-            # 计算输出FPS
-            if mode == 'multiplier':
-                output_fps = original_fps * value
+            # 统一换算为速度倍数
+            if mode == 'x':
+                mult = value
             else:  # fps
-                output_fps = value
+                mult = value / avg_fps
 
-            use_frame_drop = False
-            new_frames = []
-            new_durs = []
+            mult = max(0.05, min(mult, 30.0))
+            effective_fps = avg_fps * mult
+            use_decimation = (mult > 1 and effective_fps > 50)
+            decimation_msg = ""
 
-            if output_fps > 50:
-                # === 需要抽帧实现 ===
-                use_frame_drop = True
-                # 每 drop_ratio 帧保留 1 帧
-                drop_ratio = output_fps / 50.0
-                step = max(1, int(round(drop_ratio)))
-                output_fps = 50  # 输出限制在50fps
-                frame_dur_ms = int(1000.0 / output_fps)
-
-                for i, f in enumerate(frames):
+            if use_decimation:
+                # 抽帧模式：跳过部分帧实现高速，避免帧时长过短
+                step = max(1, round(mult))
+                out_frames = []
+                out_durs = []
+                for i, (f, d) in enumerate(zip(frames_raw, durs_raw)):
                     if i % step == 0:
-                        new_frames.append(f)
-                        new_durs.append(frame_dur_ms)
+                        # 微调时长以保证精确倍速
+                        new_d = max(20, int(d * step / mult))
+                        out_frames.append(f)
+                        out_durs.append(new_d)
 
-                if not new_frames:
-                    return "抽帧后无有效帧", None
-
-                info = (
-                    f"✅ 变速完成\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"模式: {'倍速' if mode == 'multiplier' else '帧率'}\n"
-                    f"参数: {value}{'x' if mode == 'multiplier' else 'fps'}\n"
-                    f"原始: {len(frames)}帧 | {original_fps:.1f}fps\n"
-                    f"输出: {len(new_frames)}帧 | {output_fps}fps\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"💡 目标帧率超过50fps，已自动使用抽帧实现\n"
-                    f"   抽帧比例: 每{drop_ratio:.1f}帧 → 保留1帧 (步长{step})"
+                decimation_msg = (
+                    f"\n💡 已使用抽帧实现 (目标 {effective_fps:.0f}fps > 50fps 阈值)"
+                    f"\n  原{n_orig}帧 → {len(out_frames)}帧 (每{step}帧取1帧)"
                 )
             else:
-                # === 正常变速：统一每帧duration ===
-                frame_dur_ms = max(10, int(1000.0 / output_fps))
-                new_frames = frames
-                new_durs = [frame_dur_ms] * len(frames)
-
-                info = (
-                    f"✅ 变速完成\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"模式: {'倍速' if mode == 'multiplier' else '帧率'}\n"
-                    f"参数: {value}{'x' if mode == 'multiplier' else 'fps'}\n"
-                    f"原始: {len(frames)}帧 | {original_fps:.1f}fps\n"
-                    f"输出: {len(new_frames)}帧 | {output_fps:.1f}fps"
-                )
+                # 普通变速：仅调整帧时长
+                ratio = 1.0 / mult
+                out_frames = frames_raw
+                out_durs = [max(20, int(d * ratio)) for d in durs_raw]
 
             output = io.BytesIO()
-            new_frames[0].save(
+            out_frames[0].save(
                 output, format='GIF', save_all=True,
-                append_images=new_frames[1:],
-                duration=new_durs, loop=0, disposal=2, optimize=True
+                append_images=out_frames[1:],
+                duration=out_durs,
+                loop=0, disposal=2, optimize=True
             )
             output.seek(0)
-            return info, output
+
+            size_mb = output.getbuffer().nbytes / 1024 / 1024
+            new_total_s = sum(out_durs) / 1000.0
+            old_total_s = total_dur_ms / 1000.0
+            new_avg_fps = len(out_frames) / new_total_s if new_total_s > 0 else 0
+
+            result_msg = (
+                f"✅ 变速完成 ({mode}:{value})"
+                f"\n原~{avg_fps:.0f}fps → 新~{new_avg_fps:.0f}fps"
+                f"\n时长: {old_total_s:.1f}s → {new_total_s:.1f}s"
+                f"\n帧数: {n_orig} → {len(out_frames)}"
+                f"\n体积: {size_mb:.2f}MB"
+                f"{decimation_msg}"
+            )
+
+            return result_msg, output
 
         except Exception as e:
-            return f"异常: {e}", None
+            import traceback
+            return f"异常: {e}\n{traceback.format_exc()}", None
 
     def _worker_crop_grid(self, img_data: bytes, margins: dict, rows: int, cols: int):
         img_data, crop_msg = self._crop_image_data(img_data, margins)
@@ -941,14 +794,13 @@ class SpriteToGifPlugin(Star):
     def _worker_decompose(self, img_data: bytes):
         try:
             img = PILImage.open(io.BytesIO(img_data))
+            if not getattr(img, "is_animated", False): return "⚠️ 不是GIF动画"
             frames = []
             for i, frame in enumerate(ImageSequence.Iterator(img)):
                 if i >= 100: break
                 out = io.BytesIO()
                 frame.copy().convert("RGBA").save(out, format='PNG')
                 frames.append(out.getvalue())
-            if len(frames) < 2:
-                return "⚠️ 不是GIF动画（仅1帧）"
             return frames
         except Exception as e:
             return f"❌ 出错: {e}"
