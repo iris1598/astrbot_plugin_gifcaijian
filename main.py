@@ -591,7 +591,6 @@ class SpriteToGifPlugin(Star):
 
     # --- 统一变速命令：/gif变速 ---
     @filter.command("gif变速")
-    @filter.regex(r"(?:gif)?变速\s*(\d+\.?\d*)\s*(x|X|×|倍|fps|帧)?")
     async def gif_speed_change(self, event: AstrMessageEvent):
         msg = event.message_str
         is_fps_mode = False
@@ -660,12 +659,10 @@ class SpriteToGifPlugin(Star):
             yield event.plain_result(f"❌ 失败：{res_msg}")
 
     @filter.command("加速")
-    @filter.regex(r"(?:gif)?(加速|变快)\s*[*x×]?\s*(\d+\.?\d*)?")
     async def accelerate_gif(self, event: AstrMessageEvent):
         async for res in self._legacy_speed_impl(event, True): yield res
 
     @filter.command("减速")
-    @filter.regex(r"(?:gif)?(减速|变慢)\s*[*x×]?\s*(\d+\.?\d*)?")
     async def decelerate_gif(self, event: AstrMessageEvent):
         async for res in self._legacy_speed_impl(event, False): yield res
 
@@ -1022,7 +1019,6 @@ class SpriteToGifPlugin(Star):
         return img
 
     @filter.command("表情包做旧")
-    @filter.regex(r"(?:表情包?)?做旧\s*(\d+)?")
     async def age_meme(self, event: AstrMessageEvent):
         """
         表情包做旧功能，模拟早期互联网图片传播效果
