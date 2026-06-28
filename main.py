@@ -775,24 +775,57 @@ class SpriteToGifPlugin(Star):
                 speed_factor = value
                 ratio = 1.0 / speed_factor  # 时长缩放比例
                 
-                new_durations = []
+                # 先计算不钳制的目标帧时长，判断是否需要抽帧
+                raw_durations = []
                 for d in orig_durations:
-                    new_d = max(MIN_DURATION_MS, int(d * ratio))
-                    new_durations.append(new_d)
+                    raw_durations.append(int(d * ratio))
                 
-                output = io.BytesIO()
-                frames[0].save(
-                    output, format='GIF', save_all=True,
-                    append_images=frames[1:],
-                    duration=new_durations, loop=0,
-                    disposal=2, optimize=True
-                )
-                output.seek(0)
+                avg_raw_dur = sum(raw_durations) / len(raw_durations)
                 
-                effective_fps = 1000.0 / (sum(new_durations) / len(new_durations))
-                action = "加速" if speed_factor > 1 else ("减速" if speed_factor < 1 else "")
-                msg = f"✅ 变速完成\n{speed_factor}x{action} | 原始 {orig_fps:.1f}fps → 等效 {effective_fps:.1f}fps"
-                return msg, output
+                if avg_raw_dur < MIN_DURATION_MS:
+                    # --- 等效 fps > 50，需要抽帧 ---
+                    # 策略：帧间隔保持 20ms(50fps)，按比例丢弃帧来达到等效倍速
+                    keep_ratio = avg_raw_dur / MIN_DURATION_MS
+                    frames_to_keep = max(2, int(len(frames) * keep_ratio))
+                    
+                    new_frames = []
+                    for i in range(frames_to_keep):
+                        idx = int(i * len(frames) / frames_to_keep)
+                        new_frames.append(frames[idx])
+                    
+                    new_durations = [MIN_DURATION_MS] * len(new_frames)
+                    
+                    output = io.BytesIO()
+                    new_frames[0].save(
+                        output, format='GIF', save_all=True,
+                        append_images=new_frames[1:],
+                        duration=new_durations, loop=0,
+                        disposal=2, optimize=True
+                    )
+                    output.seek(0)
+                    
+                    effective_fps = 1000.0 / MIN_DURATION_MS
+                    action = "加速" if speed_factor > 1 else ("减速" if speed_factor < 1 else "")
+                    msg = (f"✅ 变速完成\n{speed_factor}x{action} | 原始 {orig_fps:.1f}fps → 等效 {effective_fps:.0f}fps\n"
+                           f"💡 已自动抽帧实现 ({len(new_frames)}/{len(frames)}帧)")
+                    return msg, output
+                else:
+                    # 普通倍速模式: 直接设置帧间隔，不需要抽帧
+                    new_durations = raw_durations
+                    
+                    output = io.BytesIO()
+                    frames[0].save(
+                        output, format='GIF', save_all=True,
+                        append_images=frames[1:],
+                        duration=new_durations, loop=0,
+                        disposal=2, optimize=True
+                    )
+                    output.seek(0)
+                    
+                    effective_fps = 1000.0 / (sum(new_durations) / len(new_durations))
+                    action = "加速" if speed_factor > 1 else ("减速" if speed_factor < 1 else "")
+                    msg = f"✅ 变速完成\n{speed_factor}x{action} | 原始 {orig_fps:.1f}fps → 等效 {effective_fps:.1f}fps"
+                    return msg, output
                 
         except Exception as e:
             return f"异常: {e}", None
