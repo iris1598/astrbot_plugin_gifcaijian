@@ -327,14 +327,25 @@ class SpriteToGifPlugin(Star):
                 return f"⚠️ 压缩失败({retry_size:.1f}MB)，原版:\n" + msg, gif_io
         return "✅ 转换成功\n" + msg, gif_io
 
+    async def _read_local_file(self, path: str) -> bytes:
+        """异步读取本地文件（兼容 v4.26.2 PreProcessStage 把 url 替换成本地路径的情况）。"""
+        try:
+            return await asyncio.to_thread(lambda: open(path, 'rb').read())
+        except Exception as e:
+            logger.error(f"读取本地文件失败: {path} -> {type(e).__name__}: {e}")
+            return None
+
     async def _download_content(self, url: str) -> bytes:
+        if not url.startswith("http"):
+            return await self._read_local_file(url)
         headers = {"User-Agent": "Mozilla/5.0"}
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url, headers=headers, timeout=60) as resp:
                     if resp.status != 200: return None
                     return await resp.read()
-            except:
+            except Exception as e:
+                logger.error(f"_download_content 下载失败: {url} -> {type(e).__name__}: {e}")
                 return None
 
     def _worker_local_line_art(self, img_bytes: bytes) -> bytes:
@@ -485,13 +496,17 @@ class SpriteToGifPlugin(Star):
             return img_data, f"\n⚠️ 边距裁剪出错: {e}"
 
     async def _download_image(self, url: str) -> bytes:
+        """下载图片/动图。支持 HTTP URL 和本地文件路径。"""
+        if not url.startswith("http"):
+            return await self._read_local_file(url)
         headers = {"User-Agent": "Mozilla/5.0"}
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url, headers=headers, timeout=30) as resp:
                     if resp.status != 200: return None
                     return await resp.read()
-            except:
+            except Exception as e:
+                logger.error(f"_download_image 下载失败: {url} -> {type(e).__name__}: {e}")
                 return None
 
     async def _handle_gif_task(self, event: AstrMessageEvent, algorithm_mode: int):
