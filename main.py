@@ -790,6 +790,10 @@ class SpriteToGifPlugin(Star):
                 for d in orig_durations:
                     raw_durations.append(int(d * ratio))
                 
+                # 最低 1fps: 单帧时长不超过 1000ms
+                MAX_RAW_DURATION = 1000
+                raw_durations = [min(d, MAX_RAW_DURATION) for d in raw_durations]
+                
                 avg_raw_dur = sum(raw_durations) / len(raw_durations)
                 
                 if avg_raw_dur < MIN_DURATION_MS:
