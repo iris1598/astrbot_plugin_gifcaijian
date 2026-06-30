@@ -621,13 +621,10 @@ class SpriteToGifPlugin(Star):
         if fps_match:
             is_fps_mode = True
             value = float(fps_match.group(1))
-            value = max(1.0, min(value, 120.0))
         elif mult_match:
             value = float(mult_match.group(1))
-            value = max(0.1, min(value, 20.0))
         elif num_match:
             value = float(num_match.group(1))
-            value = max(0.1, min(value, 20.0))
         
         img_url = self._get_image_url(event)
         if not img_url:
@@ -664,7 +661,6 @@ class SpriteToGifPlugin(Star):
         num_match = re.search(r"(\d+\.?\d*)", msg)
         if num_match:
             factor = float(num_match.group(1))
-        factor = max(0.1, min(factor, 20.0))
         
         img_url = self._get_image_url(event)
         if not img_url: return
@@ -688,7 +684,6 @@ class SpriteToGifPlugin(Star):
         num_match = re.search(r"(\d+\.?\d*)", msg)
         if num_match:
             factor = float(num_match.group(1))
-        factor = max(0.1, min(factor, 20.0))
         
         img_url = self._get_image_url(event)
         if not img_url: return
