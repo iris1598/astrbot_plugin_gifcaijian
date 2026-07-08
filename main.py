@@ -33,6 +33,47 @@ class SpriteToGifPlugin(Star):
         if imageio is None:
             logger.warning("插件[astrbot_plugin_gifcaijian]检测到缺少 imageio 库。请运行 pip install imageio[ffmpeg]")
 
+    # --- 平台检测 & 统一回复（QQ Official 绕过 ResultDecorateStage）---
+    def _is_qqofficial(self, event: AstrMessageEvent) -> bool:
+        """检测当前消息是否来自 QQ Official 平台"""
+        try:
+            name = event.get_platform_name()
+            return name in ("qq_official_full", "qq_official_full_webhook")
+        except Exception:
+            return False
+
+    async def _emit_text(self, event: AstrMessageEvent, text: str, stop: bool = False) -> bool:
+        """
+        发送纯文本回复。
+        - QQ Official 平台：使用 event.send() 直接发送，绕过 ResultDecorateStage（避免无效 At 组件插入）
+        - 其他平台：返回 False，调用方通过 yield event.plain_result() 发送
+        返回 True 表示已通过 event.send() 直接发送，调用方不应再 yield。
+        """
+        if stop:
+            event.stop_event()
+        if self._is_qqofficial(event):
+            chain = MessageChain()
+            chain.chain = [Comp.Plain(text)]
+            await event.send(chain)
+            return True
+        return False
+
+    async def _emit_chain(self, event: AstrMessageEvent, components: list, stop: bool = False) -> bool:
+        """
+        发送组合消息回复（文本 + 图片等）。
+        - QQ Official 平台：使用 event.send() 直接发送，绕过 ResultDecorateStage
+        - 其他平台：返回 False，调用方通过 yield event.chain_result() 发送
+        返回 True 表示已通过 event.send() 直接发送，调用方不应再 yield。
+        """
+        if stop:
+            event.stop_event()
+        if self._is_qqofficial(event):
+            chain = MessageChain()
+            chain.chain = components
+            await event.send(chain)
+            return True
+        return False
+
     # --- 核心工具：统一保存动画 ---
     def _save_animation(self, output: io.BytesIO, frames: list, duration_ms: int, loop: int = 0):
         fmt = self.cfg.get('output_format', 'GIF').upper()
@@ -379,51 +420,64 @@ class SpriteToGifPlugin(Star):
     async def img_to_line_art(self, event: AstrMessageEvent):
         img_url = self._get_image_url(event)
         if not img_url:
-            yield event.plain_result("❌ 请发送图片或回复图片")
+            if not await self._emit_text(event, "❌ 请发送图片或回复图片", stop=True):
+                yield event.plain_result("❌ 请发送图片或回复图片")
             return
 
-        yield event.plain_result("⏳ 正在处理(本地模式)...")
+        if not await self._emit_text(event, "⏳ 正在处理(本地模式)..."):
+            yield event.plain_result("⏳ 正在处理(本地模式)...")
 
         # 1. 下载图片 (Bot自己下载，避免API防盗链问题)
         img_bytes = await self._download_content(img_url)
         if not img_bytes:
-            yield event.plain_result("❌ 图片下载失败 (Bot无法访问该图片链接)")
+            if not await self._emit_text(event, "❌ 图片下载失败 (Bot无法访问该图片链接)", stop=True):
+                yield event.plain_result("❌ 图片下载失败 (Bot无法访问该图片链接)")
             return
 
         # 2. 本地算法处理
         result_bytes = await asyncio.to_thread(self._worker_local_line_art, img_bytes)
 
         if result_bytes:
-            yield event.chain_result([
+            if not await self._emit_chain(event, [
                 Comp.Plain("✅ 转换成功"),
                 Comp.Image.fromBytes(result_bytes)
-            ])
+            ], stop=True):
+                yield event.chain_result([
+                    Comp.Plain("✅ 转换成功"),
+                    Comp.Image.fromBytes(result_bytes)
+                ])
         else:
-            yield event.plain_result("❌ 转换处理失败 (图片格式错误?)")
+            if not await self._emit_text(event, "❌ 转换处理失败 (图片格式错误?)", stop=True):
+                yield event.plain_result("❌ 转换处理失败 (图片格式错误?)")
 
     @filter.command("视频转gif")
     async def video_to_gif_cmd(self, event: AstrMessageEvent):
         if imageio is None:
-            yield event.plain_result("❌ 无法使用此功能：服务器缺少 imageio 库。")
+            if not await self._emit_text(event, "❌ 无法使用此功能：服务器缺少 imageio 库。", stop=True):
+                yield event.plain_result("❌ 无法使用此功能：服务器缺少 imageio 库。")
             return
         msg_text = event.message_str.replace("视频转gif", "")
         params = self._parse_video_args(msg_text)
         raw_source = self._get_video_source(event)
         if not raw_source:
-            yield event.plain_result("❌ 请回复一个视频或发送视频链接。")
+            if not await self._emit_text(event, "❌ 请回复一个视频或发送视频链接。", stop=True):
+                yield event.plain_result("❌ 请回复一个视频或发送视频链接。")
             return
         valid_source = None
         if raw_source.startswith("http") or os.path.exists(raw_source):
             valid_source = raw_source
         else:
-            yield event.plain_result("⏳ 正在请求视频地址...")
+            if not await self._emit_text(event, "⏳ 正在请求视频地址..."):
+                yield event.plain_result("⏳ 正在请求视频地址...")
             valid_source = await self._resolve_file_via_api(event, raw_source)
             if not valid_source:
-                yield event.plain_result(f"❌ 无法解析视频地址: {raw_source}")
+                if not await self._emit_text(event, f"❌ 无法解析视频地址: {raw_source}", stop=True):
+                    yield event.plain_result(f"❌ 无法解析视频地址: {raw_source}")
                 return
         fmt = self.cfg.get('output_format', 'GIF')
         time_info = f"{params['start']}s-" + (f"{params['end']}s" if params['end'] else "末尾")
-        yield event.plain_result(f"⏳ 任务已接收 ({fmt})\n区间: {time_info}\n缩放: {params['scale']}")
+        if not await self._emit_text(event, f"⏳ 任务已接收 ({fmt})\n区间: {time_info}\n缩放: {params['scale']}"):
+            yield event.plain_result(f"⏳ 任务已接收 ({fmt})\n区间: {time_info}\n缩放: {params['scale']}")
         tmp_path = ""
         is_temp_file = False
         try:
@@ -436,12 +490,14 @@ class SpriteToGifPlugin(Star):
                 async with aiohttp.ClientSession() as session:
                     async with session.get(valid_source, headers=headers, timeout=120) as resp:
                         if resp.status != 200:
-                            yield event.plain_result(f"❌ 下载失败 HTTP {resp.status}")
+                            if not await self._emit_text(event, f"❌ 下载失败 HTTP {resp.status}", stop=True):
+                                yield event.plain_result(f"❌ 下载失败 HTTP {resp.status}")
                             if os.path.exists(tmp_path): os.remove(tmp_path)
                             return
                         content_len = resp.headers.get('Content-Length')
                         if content_len and int(content_len) > max_size:
-                            yield event.plain_result(f"❌ 视频超过大小限制")
+                            if not await self._emit_text(event, f"❌ 视频超过大小限制", stop=True):
+                                yield event.plain_result(f"❌ 视频超过大小限制")
                             if os.path.exists(tmp_path): os.remove(tmp_path)
                             return
                         with open(tmp_path, 'wb') as f:
@@ -452,12 +508,15 @@ class SpriteToGifPlugin(Star):
             result_msg, gif_bytes = await asyncio.to_thread(self._worker_video_to_gif_wrapper, tmp_path, params)
             if is_temp_file and os.path.exists(tmp_path): os.remove(tmp_path)
             if gif_bytes:
-                yield event.chain_result([Comp.Plain(result_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
+                if not await self._emit_chain(event, [Comp.Plain(result_msg), Comp.Image.fromBytes(gif_bytes.getvalue())], stop=True):
+                    yield event.chain_result([Comp.Plain(result_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
             else:
-                yield event.plain_result(result_msg)
+                if not await self._emit_text(event, result_msg, stop=True):
+                    yield event.plain_result(result_msg)
         except Exception as e:
             if is_temp_file and tmp_path and os.path.exists(tmp_path): os.remove(tmp_path)
-            yield event.plain_result(f"❌ 处理异常: {repr(e)}")
+            if not await self._emit_text(event, f"❌ 处理异常: {repr(e)}", stop=True):
+                yield event.plain_result(f"❌ 处理异常: {repr(e)}")
 
     # --- 其他功能保持 ---
     def _parse_margins(self, text: str):
@@ -527,20 +586,25 @@ class SpriteToGifPlugin(Star):
                 pass
         img_url = self._get_image_url(event)
         if not img_url:
-            yield event.plain_result("❌ 未检测到图片")
+            if not await self._emit_text(event, "❌ 未检测到图片", stop=True):
+                yield event.plain_result("❌ 未检测到图片")
             return
-        yield event.plain_result(f"⏳ 正在合成(算法{algorithm_mode})... ({rows}x{cols}, 每帧{duration}s)")
+        if not await self._emit_text(event, f"⏳ 正在合成(算法{algorithm_mode})... ({rows}x{cols}, 每帧{duration}s)"):
+            yield event.plain_result(f"⏳ 正在合成(算法{algorithm_mode})... ({rows}x{cols}, 每帧{duration}s)")
         img_data = await self._download_image(img_url)
         if not img_data:
-            yield event.plain_result("❌ 图片下载失败")
+            if not await self._emit_text(event, "❌ 图片下载失败", stop=True):
+                yield event.plain_result("❌ 图片下载失败")
             return
         img_data, crop_msg = await asyncio.to_thread(self._crop_image_data, img_data, margins)
         func = self.process_mode_1 if algorithm_mode == 1 else self.process_mode_2
         res_msg, gif_bytes = await asyncio.to_thread(func, img_data, rows, cols, duration)
         if gif_bytes:
-            yield event.chain_result([Comp.Plain(res_msg + crop_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
+            if not await self._emit_chain(event, [Comp.Plain(res_msg + crop_msg), Comp.Image.fromBytes(gif_bytes.getvalue())], stop=True):
+                yield event.chain_result([Comp.Plain(res_msg + crop_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
         else:
-            yield event.plain_result(f"❌ 失败：\n{res_msg}")
+            if not await self._emit_text(event, f"❌ 失败：\n{res_msg}", stop=True):
+                yield event.plain_result(f"❌ 失败：\n{res_msg}")
 
     @filter.command("合成1gif")
     async def make_gif_v1(self, event: AstrMessageEvent):
@@ -628,18 +692,22 @@ class SpriteToGifPlugin(Star):
         
         img_url = self._get_image_url(event)
         if not img_url:
-            yield event.plain_result("❌ 请回复一个GIF或发送GIF图片\n用法: /gif变速 2x (倍速) 或 /gif变速 30fps (帧率)")
+            if not await self._emit_text(event, "❌ 请回复一个GIF或发送GIF图片\n用法: /gif变速 2x (倍速) 或 /gif变速 30fps (帧率)", stop=True):
+                yield event.plain_result("❌ 请回复一个GIF或发送GIF图片\n用法: /gif变速 2x (倍速) 或 /gif变速 30fps (帧率)")
             return
         
         if is_fps_mode:
-            yield event.plain_result(f"⏳ 正在变速到 {value:.0f}fps...")
+            if not await self._emit_text(event, f"⏳ 正在变速到 {value:.0f}fps..."):
+                yield event.plain_result(f"⏳ 正在变速到 {value:.0f}fps...")
         else:
             action = "加速" if value > 1 else ("减速" if value < 1 else "不变")
-            yield event.plain_result(f"⏳ 正在{action} {value}倍...")
+            if not await self._emit_text(event, f"⏳ 正在{action} {value}倍..."):
+                yield event.plain_result(f"⏳ 正在{action} {value}倍...")
         
         img_data = await self._download_image(img_url)
         if not img_data:
-            yield event.plain_result("❌ 下载失败")
+            if not await self._emit_text(event, "❌ 下载失败", stop=True):
+                yield event.plain_result("❌ 下载失败")
             return
         
         res_msg, gif_bytes = await asyncio.to_thread(
@@ -647,9 +715,11 @@ class SpriteToGifPlugin(Star):
         )
         
         if gif_bytes:
-            yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
+            if not await self._emit_chain(event, [Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())], stop=True):
+                yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
         else:
-            yield event.plain_result(f"❌ 失败：{res_msg}")
+            if not await self._emit_text(event, f"❌ 失败：{res_msg}", stop=True):
+                yield event.plain_result(f"❌ 失败：{res_msg}")
 
     # 保留旧指令作为别名，内部走统一逻辑
     @filter.command("加速")
@@ -663,17 +733,24 @@ class SpriteToGifPlugin(Star):
             factor = float(num_match.group(1))
         
         img_url = self._get_image_url(event)
-        if not img_url: return
-        yield event.plain_result(f"⏳ 正在加速 {factor}倍...")
+        if not img_url:
+            if not await self._emit_text(event, "❌ 请回复一个GIF或发送GIF图片", stop=True):
+                yield event.plain_result("❌ 请回复一个GIF或发送GIF图片")
+            return
+        if not await self._emit_text(event, f"⏳ 正在加速 {factor}倍..."):
+            yield event.plain_result(f"⏳ 正在加速 {factor}倍...")
         img_data = await self._download_image(img_url)
         if not img_data:
-            yield event.plain_result("❌ 下载失败")
+            if not await self._emit_text(event, "❌ 下载失败", stop=True):
+                yield event.plain_result("❌ 下载失败")
             return
         res_msg, gif_bytes = await asyncio.to_thread(self.process_speed_v2, img_data, factor, False)
         if gif_bytes:
-            yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
+            if not await self._emit_chain(event, [Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())], stop=True):
+                yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
         else:
-            yield event.plain_result(f"❌ 失败：{res_msg}")
+            if not await self._emit_text(event, f"❌ 失败：{res_msg}", stop=True):
+                yield event.plain_result(f"❌ 失败：{res_msg}")
 
     @filter.command("减速")
     @filter.regex(r"(?:gif)?(减速|变慢)\s*[*x×]?\s*(\d+\.?\d*)?")
@@ -686,20 +763,27 @@ class SpriteToGifPlugin(Star):
             factor = float(num_match.group(1))
         
         img_url = self._get_image_url(event)
-        if not img_url: return
-        yield event.plain_result(f"⏳ 正在减速 {factor}倍...")
+        if not img_url:
+            if not await self._emit_text(event, "❌ 请回复一个GIF或发送GIF图片", stop=True):
+                yield event.plain_result("❌ 请回复一个GIF或发送GIF图片")
+            return
+        if not await self._emit_text(event, f"⏳ 正在减速 {factor}倍..."):
+            yield event.plain_result(f"⏳ 正在减速 {factor}倍...")
         img_data = await self._download_image(img_url)
         if not img_data:
-            yield event.plain_result("❌ 下载失败")
+            if not await self._emit_text(event, "❌ 下载失败", stop=True):
+                yield event.plain_result("❌ 下载失败")
             return
         # 减速: ratio = factor (duration * factor)
         res_msg, gif_bytes = await asyncio.to_thread(
             self.process_speed_v2, img_data, 1.0 / factor, False
         )
         if gif_bytes:
-            yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
+            if not await self._emit_chain(event, [Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())], stop=True):
+                yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
         else:
-            yield event.plain_result(f"❌ 失败：{res_msg}")
+            if not await self._emit_text(event, f"❌ 失败：{res_msg}", stop=True):
+                yield event.plain_result(f"❌ 失败：{res_msg}")
 
     def process_speed_v2(self, img_data: bytes, value: float, is_fps_mode: bool):
         """
@@ -867,41 +951,51 @@ class SpriteToGifPlugin(Star):
         match = re.search(r'(\d+)\s*[*x×]\s*(\d+)', clean)
         rows, cols = (int(match.group(1)), int(match.group(2))) if match else (1, 1)
         if rows > 20 or cols > 20:
-            yield event.plain_result("⚠️ 行列数过大")
+            if not await self._emit_text(event, "⚠️ 行列数过大", stop=True):
+                yield event.plain_result("⚠️ 行列数过大")
             return
         img_url = self._get_image_url(event)
         if not img_url:
-            yield event.plain_result("❌ 请发送图片")
+            if not await self._emit_text(event, "❌ 请发送图片", stop=True):
+                yield event.plain_result("❌ 请发送图片")
             return
-        yield event.plain_result("⏳ 处理中...")
+        if not await self._emit_text(event, "⏳ 处理中..."):
+            yield event.plain_result("⏳ 处理中...")
         img_data = await self._download_image(img_url)
         if not img_data:
-            yield event.plain_result("❌ 下载失败")
+            if not await self._emit_text(event, "❌ 下载失败", stop=True):
+                yield event.plain_result("❌ 下载失败")
             return
         msg, bytes_list = await asyncio.to_thread(self._worker_crop_grid, img_data, margins, rows, cols)
         if not bytes_list:
-            yield event.plain_result(msg)
+            if not await self._emit_text(event, msg, stop=True):
+                yield event.plain_result(msg)
             return
         nodes = [Comp.Node(name="裁剪", content=[Comp.Plain(f"结果 {rows}x{cols}{msg}")])]
         for b in bytes_list:
             nodes.append(Comp.Node(name="裁剪", content=[Comp.Image.fromBytes(b)]))
-        yield event.chain_result([Comp.Nodes(nodes=nodes)])
+        if not await self._emit_chain(event, [Comp.Nodes(nodes=nodes)], stop=True):
+            yield event.chain_result([Comp.Nodes(nodes=nodes)])
 
     @filter.command("gif分解")
     async def decompose_gif(self, event: AstrMessageEvent):
         img_url = self._get_image_url(event)
         if not img_url:
-            yield event.plain_result("❌ 请发送GIF")
+            if not await self._emit_text(event, "❌ 请发送GIF", stop=True):
+                yield event.plain_result("❌ 请发送GIF")
             return
-        yield event.plain_result("⏳ 分解中...")
+        if not await self._emit_text(event, "⏳ 分解中..."):
+            yield event.plain_result("⏳ 分解中...")
         img_data = await self._download_image(img_url)
         frames = await asyncio.to_thread(self._worker_decompose, img_data)
         if isinstance(frames, str):
-            yield event.plain_result(frames)
+            if not await self._emit_text(event, frames, stop=True):
+                yield event.plain_result(frames)
             return
         nodes = [Comp.Node(name="GIF助手", content=[Comp.Plain(f"第{i + 1}帧"), Comp.Image.fromBytes(b)]) for i, b in
                  enumerate(frames)]
-        yield event.chain_result([Comp.Nodes(nodes=nodes)])
+        if not await self._emit_chain(event, [Comp.Nodes(nodes=nodes)], stop=True):
+            yield event.chain_result([Comp.Nodes(nodes=nodes)])
 
     def _worker_decompose(self, img_data: bytes):
         try:
@@ -1156,7 +1250,8 @@ class SpriteToGifPlugin(Star):
         
         img_url = self._get_image_url(event)
         if not img_url:
-            yield event.plain_result("❌ 请发送图片或回复图片\n用法: 表情包做旧 [次数]\n次数越大越绿越糊 (建议1-20)")
+            if not await self._emit_text(event, "❌ 请发送图片或回复图片\n用法: 表情包做旧 [次数]\n次数越大越绿越糊 (建议1-20)", stop=True):
+                yield event.plain_result("❌ 请发送图片或回复图片\n用法: 表情包做旧 [次数]\n次数越大越绿越糊 (建议1-20)")
             return
         
         # 根据次数给出提示
@@ -1169,11 +1264,13 @@ class SpriteToGifPlugin(Star):
         else:
             level = "极限做旧 (赛博遗产级别)"
         
-        yield event.plain_result(f"⏳ 正在做旧... ({times}次传播, {level})")
+        if not await self._emit_text(event, f"⏳ 正在做旧... ({times}次传播, {level})"):
+            yield event.plain_result(f"⏳ 正在做旧... ({times}次传播, {level})")
         
         img_data = await self._download_image(img_url)
         if not img_data:
-            yield event.plain_result("❌ 图片下载失败")
+            if not await self._emit_text(event, "❌ 图片下载失败", stop=True):
+                yield event.plain_result("❌ 图片下载失败")
             return
         
         # 自动检测动图类型并处理
@@ -1182,12 +1279,17 @@ class SpriteToGifPlugin(Star):
         )
         
         if result_bytes:
-            yield event.chain_result([
+            if not await self._emit_chain(event, [
                 Comp.Plain(f"{res_msg}\n💡 {level}"),
                 Comp.Image.fromBytes(result_bytes)
-            ])
+            ], stop=True):
+                yield event.chain_result([
+                    Comp.Plain(f"{res_msg}\n💡 {level}"),
+                    Comp.Image.fromBytes(result_bytes)
+                ])
         else:
-            yield event.plain_result(res_msg)
+            if not await self._emit_text(event, res_msg, stop=True):
+                yield event.plain_result(res_msg)
 
     @filter.command("多图合成gif")
     async def multi_img_gif(self, event: AstrMessageEvent):
@@ -1218,16 +1320,19 @@ class SpriteToGifPlugin(Star):
                 except:
                     pass
 
-        yield event.plain_result("⏳ 正在搜集图片资源...")
+        if not await self._emit_text(event, "⏳ 正在搜集图片资源..."):
+            yield event.plain_result("⏳ 正在搜集图片资源...")
 
         # 2. 获取所有图片链接
         img_urls = await self._get_all_image_urls(event)
 
         if not img_urls or len(img_urls) < 1:
-            yield event.plain_result("❌ 未检测到足够的图片资源 (请回复图片消息，或发送包含图片的合并转发)")
+            if not await self._emit_text(event, "❌ 未检测到足够的图片资源 (请回复图片消息，或发送包含图片的合并转发)", stop=True):
+                yield event.plain_result("❌ 未检测到足够的图片资源 (请回复图片消息，或发送包含图片的合并转发)")
             return
 
-        yield event.plain_result(f"⏳ 正在下载 {len(img_urls)} 张图片并合成 (每帧{duration:.2f}s)...")
+        if not await self._emit_text(event, f"⏳ 正在下载 {len(img_urls)} 张图片并合成 (每帧{duration:.2f}s)..."):
+            yield event.plain_result(f"⏳ 正在下载 {len(img_urls)} 张图片并合成 (每帧{duration:.2f}s)...")
 
         # 3. 并发下载图片
         tasks = [self._download_content(url) for url in img_urls]
@@ -1235,16 +1340,22 @@ class SpriteToGifPlugin(Star):
         valid_bytes = [b for b in results if b is not None]
 
         if len(valid_bytes) < 1:  # 允许单张图变成GIF (静止或只有一帧)
-            yield event.plain_result("❌ 图片下载失败")
+            if not await self._emit_text(event, "❌ 图片下载失败", stop=True):
+                yield event.plain_result("❌ 图片下载失败")
             return
 
         # 4. 执行合成
         res_msg, gif_io = await asyncio.to_thread(self._worker_multi_image_gif, valid_bytes, duration)
 
         if gif_io:
-            yield event.chain_result([
+            if not await self._emit_chain(event, [
                 Comp.Plain(f"{res_msg}\n画布适应最大尺寸，自动居中填充"),
                 Comp.Image.fromBytes(gif_io.getvalue())
-            ])
+            ], stop=True):
+                yield event.chain_result([
+                    Comp.Plain(f"{res_msg}\n画布适应最大尺寸，自动居中填充"),
+                    Comp.Image.fromBytes(gif_io.getvalue())
+                ])
         else:
-            yield event.plain_result(res_msg)
+            if not await self._emit_text(event, res_msg, stop=True):
+                yield event.plain_result(res_msg)
