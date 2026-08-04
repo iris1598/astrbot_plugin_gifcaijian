@@ -21,8 +21,8 @@ except ImportError:
 @register(
     "astrbot_plugin_gifcaijian",
     "shskjw",
-    "支持GIF/APNG/WebP转换、裁剪、变速(倍速&帧率,>50fps抽帧)、本地图片转线稿及多图合成(终极稳定版)",
-    "1.5.0",
+    "支持GIF/APNG/WebP转换、裁剪、变速(倍速&帧率,>50fps抽帧)、GIF倒放、本地图片转线稿及多图合成(终极稳定版)",
+    "1.6.0",
     "https://github.com/shkjw/astrbot_plugin_gifcaijian",
 )
 class SpriteToGifPlugin(Star):
@@ -1010,6 +1010,79 @@ class SpriteToGifPlugin(Star):
             return frames
         except Exception as e:
             return f"❌ 出错: {e}"
+
+    # --- GIF倒放: 将动画帧顺序反转实现倒放播放 ---
+    @filter.command("gif倒放")
+    async def gif_reverse(self, event: AstrMessageEvent):
+        async for res in self._handle_reverse_gif(event):
+            yield res
+
+    @filter.command("倒放")
+    async def gif_reverse_alias(self, event: AstrMessageEvent):
+        """倒放别名: 兼容不带gif前缀的指令"""
+        async for res in self._handle_reverse_gif(event):
+            yield res
+
+    async def _handle_reverse_gif(self, event: AstrMessageEvent):
+        img_url = self._get_image_url(event)
+        if not img_url:
+            if not await self._emit_text(event, "❌ 请回复一个GIF或发送GIF图片\n用法: gif倒放", stop=True):
+                yield event.plain_result("❌ 请回复一个GIF或发送GIF图片\n用法: gif倒放")
+            return
+        if not await self._emit_text(event, "⏳ 正在倒放..."):
+            yield event.plain_result("⏳ 正在倒放...")
+        img_data = await self._download_image(img_url)
+        if not img_data:
+            if not await self._emit_text(event, "❌ 下载失败", stop=True):
+                yield event.plain_result("❌ 下载失败")
+            return
+        res_msg, gif_bytes = await asyncio.to_thread(self._worker_reverse_gif, img_data)
+        if gif_bytes:
+            if not await self._emit_chain(event, [Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())], stop=True):
+                yield event.chain_result([Comp.Plain(res_msg), Comp.Image.fromBytes(gif_bytes.getvalue())])
+        else:
+            if not await self._emit_text(event, f"❌ 失败：{res_msg}", stop=True):
+                yield event.plain_result(f"❌ 失败：{res_msg}")
+
+    def _worker_reverse_gif(self, img_data: bytes):
+        """将GIF动画帧顺序反转，实现倒放效果"""
+        try:
+            img = PILImage.open(io.BytesIO(img_data))
+            if not getattr(img, "is_animated", False):
+                return "⚠️ 不是GIF动画", None
+
+            frames = []
+            durations = []
+            for frame in ImageSequence.Iterator(img):
+                dur = frame.info.get('duration', 100)
+                if dur <= 0:
+                    dur = 100
+                durations.append(dur)
+                frames.append(frame.convert("RGBA"))
+
+            if len(frames) < 2:
+                return "⚠️ 帧数不足，无需倒放", None
+
+            frames.reverse()
+            durations.reverse()
+
+            # 统一量化为调色板模式，保证GIF保存正常且色彩一致
+            gif_frames = []
+            for f in frames:
+                gif_frames.append(f.convert("P", palette=PILImage.Palette.ADAPTIVE, colors=256))
+
+            output = io.BytesIO()
+            gif_frames[0].save(
+                output, format='GIF', save_all=True,
+                append_images=gif_frames[1:],
+                duration=durations, loop=0,
+                disposal=2, optimize=True
+            )
+            output.seek(0)
+            total_ms = sum(durations)
+            return f"✅ 倒放完成 ({len(frames)}帧, 时长{total_ms / 1000:.2f}s)", output
+        except Exception as e:
+            return f"❌ 出错: {e}", None
 
     # --- 新增: 多图合成 GIF 核心处理逻辑 ---
     def _worker_multi_image_gif(self, images_bytes: list[bytes], duration_sec: float):
