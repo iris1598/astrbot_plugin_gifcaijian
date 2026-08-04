@@ -1058,7 +1058,7 @@ class SpriteToGifPlugin(Star):
                 if dur <= 0:
                     dur = 100
                 durations.append(dur)
-                frames.append(frame.convert("RGBA"))
+                frames.append(frame.copy().convert("RGBA"))
 
             if len(frames) < 2:
                 return "⚠️ 帧数不足，无需倒放", None
@@ -1066,18 +1066,38 @@ class SpriteToGifPlugin(Star):
             frames.reverse()
             durations.reverse()
 
-            # 统一量化为调色板模式，保证GIF保存正常且色彩一致
+            # 检测是否包含透明像素
+            has_trans = any(f.getchannel("A").getextrema()[0] < 255 for f in frames)
+            w, h = frames[0].size
+
+            # 构建共享调色板(最多拼16帧取色)，保证各帧颜色一致
+            master = PILImage.new("RGB", (w * min(len(frames), 16), h), (255, 255, 255))
+            for i, f in enumerate(frames[:16]):
+                master.paste(f.convert("RGB"), (i * w, 0))
+            master_pal = master.quantize(colors=255 if has_trans else 256, method=1)
+
+            # 统一量化到共享调色板；有透明时保留索引255作为透明色
             gif_frames = []
             for f in frames:
-                gif_frames.append(f.convert("P", palette=PILImage.Palette.ADAPTIVE, colors=256))
+                pf = f.convert("RGB").quantize(palette=master_pal)
+                if has_trans:
+                    mask = f.getchannel("A").point(lambda a: 255 if a < 128 else 0)
+                    pf.paste(255, mask=mask)
+                gif_frames.append(pf)
 
             output = io.BytesIO()
-            gif_frames[0].save(
-                output, format='GIF', save_all=True,
+            save_kwargs = dict(
+                format='GIF', save_all=True,
                 append_images=gif_frames[1:],
                 duration=durations, loop=0,
-                disposal=2, optimize=True
+                disposal=2,
+                optimize=not has_trans,
             )
+            if has_trans:
+                # 透明背景: 透明索引与背景索引都指向255，避免恢复背景时露出其他颜色(如绿色)
+                save_kwargs['transparency'] = 255
+                save_kwargs['background'] = 255
+            gif_frames[0].save(output, **save_kwargs)
             output.seek(0)
             total_ms = sum(durations)
             return f"✅ 倒放完成 ({len(frames)}帧, 时长{total_ms / 1000:.2f}s)", output
