@@ -251,6 +251,9 @@ class SpriteToGifPlugin(Star):
             return None
 
     # --- 智能参数解析 ---
+    # 语法: -参数 值 / -参数=值 / -参数值 (兼容无间隔)
+    # 支持: -start/-s 开始秒, -end/-e 结束秒, -dur/-d/-len/-time 时长秒,
+    #       -fps 帧率, -step/-st 每n帧取1帧, -scale/-sc 缩放(0.1-1.0)
     def _parse_video_args(self, text: str):
         default_scale = self.cfg.get('default_scale', 0.3)
         default_fps = self.cfg.get('default_fps', 10)
@@ -258,33 +261,44 @@ class SpriteToGifPlugin(Star):
             'start': 0.0, 'end': None, 'fps': default_fps,
             'step': 1, 'scale': default_scale, 'force_step': False
         }
-        time_range = re.search(r'(\d+(?:\.\d+)?)[sS]?\s*[-~]\s*(\d+(?:\.\d+)?)[sS]?', text)
-        if time_range:
-            params['start'] = float(time_range.group(1))
-            params['end'] = float(time_range.group(2))
-            text = text.replace(time_range.group(0), " ")
-        else:
-            start_match = re.search(r'(?:开始|start)\s*(\d+(?:\.\d+)?)', text)
-            dur_match = re.search(r'(?:时长|len|time)\s*(\d+(?:\.\d+)?)', text)
-            if start_match: params['start'] = float(start_match.group(1))
-            if dur_match: params['end'] = params['start'] + float(dur_match.group(1))
 
-        step_match = re.search(r'(\d+)\s*/\s*(\d+)', text)
-        if step_match:
-            n1 = int(step_match.group(1))
-            n2 = int(step_match.group(2))
-            step_val = max(n1, n2)
-            if step_val > 0:
-                params['step'] = step_val
-                params['fps'] = None
-                params['force_step'] = True
-            text = text.replace(step_match.group(0), " ")
-        else:
-            fps_match = re.search(r'(?:fps|帧率)\s*(\d+)', text)
-            if fps_match: params['fps'] = int(fps_match.group(1))
+        def grab(aliases: str):
+            """尝试三种写法: -key=val / -key val / -keyval, 返回数值或 None"""
+            pat = r'-(' + aliases + r')\s*=\s*(\d+(?:\.\d+)?)'
+            m = re.search(pat, text)
+            if not m:
+                m = re.search(r'-(' + aliases + r')\s+(\d+(?:\.\d+)?)', text)
+            if not m:
+                m = re.search(r'-(' + aliases + r')(\d+(?:\.\d+)?)', text)
+            if not m:
+                return None
+            return float(m.group(2))
 
-        scale_match = re.search(r'\b(0\.\d+|1\.0)\b', text)
-        if scale_match: params['scale'] = float(scale_match.group(1))
+        start = grab(r's(?:tart)?')
+        if start is not None:
+            params['start'] = start
+
+        end = grab(r'e(?:nd)?')
+        if end is not None:
+            params['end'] = end
+
+        dur = grab(r'd(?:ur)?|len|time')
+        if dur is not None:
+            params['end'] = params['start'] + dur
+
+        step = grab(r'st(?:ep)?')
+        if step is not None and step > 0:
+            params['step'] = int(step)
+            params['fps'] = None
+            params['force_step'] = True
+
+        fps = grab(r'fps')
+        if fps is not None and not params['force_step']:
+            params['fps'] = int(fps)
+
+        scale = grab(r'sc(?:ale)?')
+        if scale is not None:
+            params['scale'] = scale
         if params['scale'] < 0.1: params['scale'] = 0.1
         if params['scale'] > 1.0: params['scale'] = 1.0
         return params
